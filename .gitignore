@@ -1,0 +1,15 @@
+# Raw UART captures and the abandoned esplink --dump reassembly. The parsed
+# CSVs beside them are what the analysis reads.
+uart.log
+uart_clean.log
+*.bin
+all.csv
+
+# Bitstreams and build artifacts: tens of megabytes, not needed to reproduce
+# the analysis.
+bit_*/
+*.bit
+*.mcs
+
+__pycache__/
+.ipynb_checkpoints/
