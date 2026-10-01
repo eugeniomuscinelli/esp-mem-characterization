@@ -87,7 +87,10 @@ CAMPAIGNS = {
                  "multiot_ot2_gate1":  "run_multiot_ot2_gate1_bp"},
     },
     "4x4": {
-        "root": os.path.expanduser("~/char_results_4x4"),
+        # Beside charlib.py when the campaign travels with it (a repo checkout, a
+        # Colab VM); the working tree on the machine that ran it otherwise.
+        "root": (RESULTS_DIR if os.path.isdir(os.path.join(RESULTS_DIR, "run_4x4_baseline"))
+                 else os.path.expanduser("~/char_results_4x4")),
         "dirs": {"baseline_ot1_gate0": "run_4x4_baseline",
                  "multiot_ot4_gate1":  "run_4x4_ot4",
                  "multiot_ot2_gate1":  "run_4x4_ot2"},
