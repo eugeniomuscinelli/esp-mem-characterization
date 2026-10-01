@@ -1118,3 +1118,153 @@ def plot_inbound_not_the_limit(arms, n_active=13, figsize=(7.8, 5.4)):
                  fontsize=11, color=INK["primary"], x=0.012, ha="left", y=0.985)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
+
+
+# ---------------------------------------------------------------- run anatomy
+
+SIZE_BEATS_4X4 = 65_536          # read beats per accelerator per run, every run
+PLM_WORDS      = 16_384          # the accelerator's local buffer, 64-bit words
+FLITS_PER_DESC = 3               # header, address, length -- independent of length
+MIG_PORT_BPS   = 8 * 156.25e6    # 64 bit at ui_clk = 1.25 GB/s
+DDR4_BPS       = 10.0e9          # 1250 MT/s x 64 bit
+
+
+def run_anatomy(arm: Arm, n_active: int = 13) -> pd.DataFrame:
+    """
+    What one run consists of, per accelerator, at each descriptor length.
+
+    Every run moves the same read volume; only the number of requests changes.
+    `flits` is measured, not assumed, so the 3-flits-per-descriptor claim is
+    checked against hardware rather than stated.
+    """
+    o = occupancy(arm)
+    s = o[(o.rd == 1) & (o.wr == 0) & (o.n_active == n_active)].groupby("burst").mean(
+        numeric_only=True)
+    d = pd.DataFrame(index=s.index)
+    d["descriptors per accelerator"] = (SIZE_BEATS_4X4 // s.index).astype(int)
+    d["PLM words used"] = s.index.map(lambda b: min(b, PLM_WORDS)).astype(int)
+    d["PLM fraction used"] = (d["PLM words used"] / PLM_WORDS).round(4)
+    d["request flits measured"] = s.dma_req_flits.astype(int)
+    d["flits per descriptor"] = (s.dma_req_flits
+                                 / (d["descriptors per accelerator"] * n_active)).round(2)
+    d.index.name = "descriptor length (beats)"
+    return d
+
+
+def traffic_by_mix(arm: Arm, n_active: int = 13, burst: int = 256) -> pd.DataFrame:
+    """
+    Total DRAM traffic per accelerator per run, by read:write ratio.
+
+    The read volume is fixed by SIZE_BEATS; writes are a multiple of it set by the
+    ratio. So the mixes do NOT move equal bytes, which matters whenever they are
+    compared by throughput.
+    """
+    o = occupancy(arm)
+    s = o[(o.n_active == n_active) & (o.burst == burst)]
+    rows = []
+    for (rd, wr), t in s.groupby(["rd", "wr"]):
+        t = t.mean(numeric_only=True)
+        rb, wb = t.ddr_read_beats / n_active, t.ddr_write_beats / n_active
+        rows.append({"mix": f"{int(rd)}:{int(wr)}",
+                     "read beats": round(rb), "write beats": round(wb),
+                     "total beats": round(rb + wb),
+                     "KiB per accelerator": round((rb + wb) * 8 / 1024),
+                     "PLM capacities": round((rb + wb) / PLM_WORDS, 2)})
+    return pd.DataFrame(rows).set_index("mix")
+
+
+def bottleneck_ladder(arms: dict, n_active: int = 13) -> pd.DataFrame:
+    """
+    Every candidate limit in the path, with the utilisation actually reached.
+
+    A resource cannot be the constraint while it is idle, so this table is the
+    argument: only the row whose utilisation approaches its own maximum is a
+    candidate, and the mix dependence distinguishes a direction-blind resource
+    (the AXI port) from a direction-specific one (the NoC path).
+    """
+    g = occupancy_all(arms)
+    rows = []
+    long_ro = g[(g.rd == 1) & (g.wr == 0) & (g.burst == 16384)
+                & (g.n_active == n_active)].tot_beats_per_cyc.mean()
+    peak = g.tot_beats_per_cyc.max()
+    ro_peak = g[(g.rd == 1) & (g.wr == 0)].tot_beats_per_cyc.max()
+    rows.append({"resource": "DDR4 chip", "capacity": f"{DDR4_BPS/1e9:.0f} GB/s",
+                 "reached at long descriptors": f"{100*long_ro*MIG_PORT_BPS/DDR4_BPS:.1f}%",
+                 "best reached anywhere": f"{100*peak*MIG_PORT_BPS/DDR4_BPS:.1f}%"})
+    rows.append({"resource": "MIG AXI port", "capacity": f"{MIG_PORT_BPS/1e9:.2f} GB/s",
+                 "reached at long descriptors": f"{100*long_ro:.1f}%",
+                 "best reached anywhere": f"{100*peak:.1f}%"})
+    rows.append({"resource": "outbound NoC path (read data)",
+                 "capacity": "not independently known",
+                 "reached at long descriptors": f"{100*long_ro:.1f}%",
+                 "best reached anywhere": f"{100*ro_peak:.1f}% (read-only ceiling)"})
+    return pd.DataFrame(rows).set_index("resource")
+
+
+def elapsed_comparison(arms: dict, rdg=1, wrg=0, n_active: int = 13) -> pd.DataFrame:
+    """
+    Total elapsed cycles at constant data moved: who finishes first.
+
+    The most direct statement the campaign can make, and the one that shows the
+    optimum is neither the shortest nor the longest descriptor.
+    """
+    cols = {}
+    for k in ARM_ORDER:
+        if k not in arms:
+            continue
+        r = arms[k].runs
+        s = r[(r.n_active == n_active) & (r.rd_per_group == rdg)
+              & (r.wr_per_group == wrg)]
+        cols[LABEL[k]] = (s.groupby(["burst", "rep"]).cyc_all_done.max()
+                          .groupby("burst").mean())
+    d = pd.DataFrame(cols)
+    base = d[LABEL["baseline_ot1_gate0"]]
+    d.insert(0, "baseline, ms", (base / ACC_CLK_HZ * 1e3).round(2))
+    d["vs baseline optimum"] = (base / base.min()).round(2)
+    d.index.name = "descriptor length (beats)"
+    return d.round(0)
+
+
+def service_time(arms: dict, rdg=1, wrg=0, n_active: int = 13) -> pd.DataFrame:
+    """
+    Cycles the memory tile spends on one descriptor, and the inbound refusal it
+    produces while it does.
+
+    Inbound stall is service time seen from the network side: the tile accepts a
+    descriptor's flits, then refuses everything offered until it is done.
+    """
+    out = {}
+    for k in ARM_ORDER:
+        if k not in arms:
+            continue
+        o = occupancy(arms[k])
+        s = o[(o.rd == rdg) & (o.wr == wrg) & (o.n_active == n_active)].groupby(
+            "burst").mean(numeric_only=True)
+        rate = s.ddr_read_beats / s.mem_cyc
+        out[(LABEL[k], "service cycles")] = (s.index / rate).round(0)
+        out[(LABEL[k], "inbound stall %")] = (100 * s.noc_stop_req / s.mem_cyc).round(1)
+    d = pd.DataFrame(out)
+    d.columns = pd.MultiIndex.from_tuples(d.columns)
+    d.index.name = "descriptor length (beats)"
+    return d
+
+
+def effective_concurrency(arms: dict, rdg=1, wrg=0, n_active: int = 13) -> pd.DataFrame:
+    """
+    Aggregate throughput expressed in units of one accelerator's port rate.
+
+    One accelerator absorbs at most one 64-bit word per its own 78.125 MHz cycle,
+    so this ratio reads as how many accelerators were effectively being served at
+    once. It is bounded above by n_active everywhere in the campaign, which is the
+    check that makes the reading safe rather than assumed.
+    """
+    out = {}
+    for k in ARM_ORDER:
+        if k not in arms:
+            continue
+        o = occupancy(arms[k])
+        s = o[(o.rd == rdg) & (o.wr == wrg) & (o.n_active == n_active)]
+        out[LABEL[k]] = s.groupby("burst").words_per_acc_cyc.mean().round(3)
+    d = pd.DataFrame(out)
+    d.index.name = "descriptor length (beats)"
+    return d
