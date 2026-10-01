@@ -76,25 +76,45 @@ class Arm:
                 f"{len(self.mem)} mem rows, {len(self.tile)} tile rows>")
 
 
-def _dir_for(key: str) -> str:
+# Two campaigns share this code. The 3x3 is the completed study; the 4x4 uses
+# the same three arms on a larger mesh with the corrected counters, and lands in
+# a separate tree so neither can overwrite the other.
+CAMPAIGNS = {
+    "3x3": {
+        "root": RESULTS_DIR,
+        "dirs": {"baseline_ot1_gate0": "run_baseline_ot1_gate0_bp",
+                 "multiot_ot4_gate1":  "run_multiot_ot4_gate1_bp",
+                 "multiot_ot2_gate1":  "run_multiot_ot2_gate1_bp"},
+    },
+    "4x4": {
+        "root": os.path.expanduser("~/char_results_4x4"),
+        "dirs": {"baseline_ot1_gate0": "run_4x4_baseline",
+                 "multiot_ot4_gate1":  "run_4x4_ot4",
+                 "multiot_ot2_gate1":  "run_4x4_ot2"},
+    },
+}
+
+
+def _dir_for(key: str, campaign: str = "3x3") -> str:
     """
-    The capture this study uses, one per arm: the `_bp` directory.
+    The capture a campaign uses for one arm.
 
-    Earlier captures of the same arms exist on disk. They are not used. Two of
-    them ran an incomplete sweep (429 accelerator rows instead of 624) and all of
-    them predate the backpressure counters, so their mem.csv has 17 columns
-    instead of 21. The `_bp` captures are a strict superset: same sweep, same
-    bitstreams, more counters. `reproducibility()` compares against them once, as
-    evidence that a single capture is not a fluke, and nothing else reads them.
+    For the 3x3 these are the `_bp` directories. Earlier captures of the same
+    arms exist on disk and are not used: two ran an incomplete sweep and all of
+    them predate the backpressure counters. `reproducibility()` compares against
+    them once, and nothing else reads them.
     """
-    return os.path.join(RESULTS_DIR, f"run_{key}_bp")
+    c = CAMPAIGNS[campaign]
+    return os.path.join(c["root"], c["dirs"][key])
 
 
-def available_arms() -> list[str]:
+def available_arms(campaign: str = "3x3") -> list[str]:
     """Arms with a complete, parsed result set, in fixed presentation order."""
     out = []
     for k in ARM_ORDER:
-        d = _dir_for(k)
+        if k not in CAMPAIGNS[campaign]["dirs"]:
+            continue
+        d = _dir_for(k, campaign)
         if all(os.path.isfile(os.path.join(d, f))
                for f in ("runs.csv", "mem.csv", "tile.csv")):
             out.append(k)
@@ -120,8 +140,8 @@ def _read_csv_strict(path: str) -> tuple:
     return pd.read_csv(StringIO("\n".join([hdr] + good))), dropped
 
 
-def load_arm(key: str) -> Arm:
-    d = _dir_for(key)
+def load_arm(key: str, campaign: str = "3x3") -> Arm:
+    d = _dir_for(key, campaign)
     runs, d_runs = _read_csv_strict(os.path.join(d, "runs.csv"))
     mem, d_mem = _read_csv_strict(os.path.join(d, "mem.csv"))
     tile, d_tile = _read_csv_strict(os.path.join(d, "tile.csv"))
@@ -131,8 +151,8 @@ def load_arm(key: str) -> Arm:
     return a
 
 
-def load_all() -> dict[str, Arm]:
-    return {k: load_arm(k) for k in available_arms()}
+def load_all(campaign: str = "3x3") -> dict[str, Arm]:
+    return {k: load_arm(k, campaign) for k in available_arms(campaign)}
 
 
 # ---------------------------------------------------------------- integrity
@@ -718,9 +738,14 @@ def occupancy(arm: Arm) -> pd.DataFrame:
     One row per run: throughput and every cycle-occupancy counter, in consistent
     units. This is the table every conclusion about the memory path rests on.
 
-    Elapsed time comes from the CPU's cycle count, which ticks at the accelerator
-    rate, so it is converted to memory-tile cycles before being used as the
-    denominator for counters that tick at the memory-tile rate.
+    The denominator matters. Every counter here ticks at the memory-tile rate, so
+    an occupancy is only exact if the elapsed count shares that clock AND the same
+    sampling window. The 4x4 campaign added `mem_cycles`, a free-running counter
+    in the monitor's own domain latched by the same burst write as the others, so
+    it satisfies both and is used when present. The 3x3 has no such column and
+    falls back to the CPU's cycle count scaled by the clock ratio, which shares
+    neither exactly -- which is why its starvation occupancies can exceed 100%.
+    `mem_cyc_source` records which was used.
     """
     r, m = arm.runs, arm.mem
     agg = r.groupby("run_id").agg(
@@ -730,7 +755,12 @@ def occupancy(arm: Arm) -> pd.DataFrame:
     ).reset_index()
     mm = m.groupby("run_id").sum(numeric_only=True).reset_index()
     d = agg.merge(mm, on="run_id", suffixes=("", "_m"))
-    d["mem_cyc"] = d.cyc_acc * MEM_PER_ACC_CYCLE
+    if "mem_cycles" in d.columns and (d.mem_cycles > 0).all():
+        d["mem_cyc"] = d.mem_cycles.astype(float)
+        d["mem_cyc_source"] = "measured"
+    else:
+        d["mem_cyc"] = d.cyc_acc * MEM_PER_ACC_CYCLE
+        d["mem_cyc_source"] = "derived"
     d["rd_beats_per_cyc"] = d.ddr_read_beats / d.mem_cyc
     d["wr_beats_per_cyc"] = d.ddr_write_beats / d.mem_cyc
     d["tot_beats_per_cyc"] = (d.ddr_read_beats + d.ddr_write_beats) / d.mem_cyc
