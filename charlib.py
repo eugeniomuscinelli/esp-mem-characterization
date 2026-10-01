@@ -896,3 +896,225 @@ def plot_bp_vs_throughput(arms: dict, n_active: int = 6, figsize=(11.5, 7.2)):
                  fontsize=12, color=INK["primary"], x=0.02, ha="left", y=0.985)
     fig.tight_layout(rect=[0, 0, 1, 0.955])
     return fig
+
+
+# ---------------------------------------------------------------- 4x4 figures
+
+def _ax(ax, xlabel=None, ylabel=None, title=None, logx=False):
+    """Recessive axes: thin grid, no top/right spines, ink-token text."""
+    if logx:
+        ax.set_xscale("log", base=2)
+    ax.grid(alpha=.3, color=INK["grid"], lw=.8)
+    ax.set_axisbelow(True)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"):
+        ax.spines[sp].set_color(INK["grid"])
+    ax.tick_params(colors=INK["secondary"], labelsize=9)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=9, color=INK["secondary"])
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9, color=INK["secondary"])
+    if title:
+        ax.set_title(title, fontsize=10.5, color=INK["primary"], loc="left", pad=10)
+    return ax
+
+
+def _label_end(ax, x, y, text, color):
+    """Direct label in ink, placed beside the final marker which carries the hue."""
+    ax.annotate(text, xy=(x, y), xytext=(6, 0), textcoords="offset points",
+                va="center", ha="left", fontsize=8.5, color=INK["secondary"])
+    ax.plot([x], [y], "o", color=color, ms=7, zorder=5)
+
+
+def plot_speedup_vs_fanin(arms, figsize=(12.0, 4.3)):
+    """
+    Speedup over baseline against the number of concurrent accelerators.
+
+    The question the larger mesh was built to answer, so it gets the simplest
+    possible form: one ordered x-axis, one line per arm, a reference line at
+    parity. Two panels because the answer differs between read-only and balanced
+    traffic, and a single panel would hide that.
+    """
+    import matplotlib.pyplot as plt
+    g = occupancy_all(arms)
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
+    panels = [(1, 0, 8, "read-only, 8-beat descriptors"),
+              (1, 1, 32, "balanced 1:1, 32-beat descriptors")]
+    for ax, (rdg, wrg, burst, title) in zip(axes, panels):
+        base = g[(g.arm == "baseline_ot1_gate0") & (g.rd == rdg) & (g.wr == wrg)
+                 & (g.burst == burst)].set_index("n_active").tot_beats_per_cyc
+        ax.axhline(1.0, color=INK["muted"], ls=":", lw=1.2, zorder=1)
+        for arm in ("multiot_ot2_gate1", "multiot_ot4_gate1"):
+            s = g[(g.arm == arm) & (g.rd == rdg) & (g.wr == wrg)
+                  & (g.burst == burst)].set_index("n_active").tot_beats_per_cyc
+            sp = (s / base).sort_index()
+            ax.plot(sp.index, sp.values, "-o", color=PALETTE[arm], lw=2, ms=7,
+                    label=LABEL[arm], zorder=3)
+            _label_end(ax, sp.index[-1], sp.values[-1],
+                       f"{sp.values[-1]:.2f}x", PALETTE[arm])
+        _ax(ax, "concurrently active accelerators", None, title)
+        ax.set_xticks(sorted(g.n_active.unique()))
+        ax.set_xlim(0.2, 15.6)
+    axes[0].set_ylabel("throughput relative to baseline", fontsize=9,
+                       color=INK["secondary"])
+    axes[0].legend(fontsize=8.5, frameon=False, loc="upper left")
+    for ax in axes:
+        ax.axvline(6, color=INK["muted"], ls="--", lw=1, zorder=1)
+    axes[0].annotate("the 3x3 campaign\nmeasured only to here", xy=(6.35, 1.18),
+                     fontsize=8, color=INK["muted"], ha="left", va="bottom")
+    fig.suptitle("multiOT's benefit grows with fan-in, then plateaus",
+                 fontsize=12.5, color=INK["primary"], x=0.012, ha="left", y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return fig
+
+
+def plot_inbound_onset(arms, burst=256, figsize=(7.6, 4.3)):
+    """
+    Inbound request-plane stall against accelerator count.
+
+    One panel, two workload categories. The point is a threshold, so the x-axis
+    is the ordered variable and the 3x3's range is marked rather than described.
+    """
+    import matplotlib.pyplot as plt
+    g = occupancy_all(arms)
+    b = g[(g.arm == "baseline_ot1_gate0") & (g.burst == burst)]
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.axvspan(0.2, 6, color=INK["grid"], alpha=.55, zorder=0, lw=0)
+    ax.annotate("range covered\nby the 3x3 campaign", xy=(2.3, 88), fontsize=8,
+                color=INK["muted"], ha="center", va="center")
+    for (rdg, wrg, lab, col) in [(1, 0, "read-only", PALETTE["baseline_ot1_gate0"]),
+                                 (1, 1, "balanced 1:1", PALETTE["multiot_ot4_gate1"])]:
+        s = b[(b.rd == rdg) & (b.wr == wrg)].sort_values("n_active")
+        ax.plot(s.n_active, s.noc_stop_req_pct, "-o", color=col, lw=2, ms=7,
+                label=lab, zorder=3)
+        _label_end(ax, s.n_active.iloc[-1], s.noc_stop_req_pct.iloc[-1],
+                   f"{s.noc_stop_req_pct.iloc[-1]:.0f}%", col)
+    _ax(ax, "concurrently active accelerators",
+        "cycles the memory tile refused\nan inbound request flit (%)")
+    ax.set_xticks(sorted(g.n_active.unique()))
+    ax.set_xlim(0.2, 15.6); ax.set_ylim(-3, 105)
+    ax.legend(fontsize=8.5, frameon=False, loc="center left")
+    ax.set_title(f"Inbound backpressure against fan-in  ·  "
+                 f"baseline, {burst}-beat descriptors",
+                 fontsize=11, color=INK["primary"], loc="left", pad=10)
+    ax.annotate("read-only: exactly 0.0%\nthrough 6 accelerators", xy=(4.3, 4),
+                fontsize=8, color=INK["secondary"], ha="center", va="bottom")
+    fig.tight_layout()
+    return fig
+
+
+def plot_quantum(arms, burst=16384, figsize=(12.0, 4.3)):
+    """
+    The central measurement, in both units.
+
+    Left: aggregate throughput, which is flat in the number of accelerators.
+    Right: the same divided by the accelerator clock, which lands on 1.000.
+    Two panels rather than two y-axes, because a dual-axis chart would imply a
+    relationship between the scales that does not exist.
+    """
+    import matplotlib.pyplot as plt
+    g = occupancy_all(arms)
+    s = g[(g.rd == 1) & (g.wr == 0) & (g.burst == burst)]
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    # The three arms are identical to four decimal places at this operating point,
+    # so drawn at equal weight only the last would be visible. Nesting the widths
+    # shows the coincidence instead of hiding two thirds of the data under one line.
+    width = {ARM_ORDER[0]: (6.0, 13), ARM_ORDER[1]: (3.0, 9), ARM_ORDER[2]: (1.4, 5)}
+    for z, arm in enumerate(ARM_ORDER):
+        t = s[s.arm == arm].sort_values("n_active")
+        if t.empty:
+            continue
+        lw, ms = width[arm]
+        for ax, col in ((axes[0], "tot_beats_per_cyc"), (axes[1], "words_per_acc_cyc")):
+            ax.plot(t.n_active, t[col], "-o", color=PALETTE[arm], lw=lw, ms=ms,
+                    label=LABEL[arm], zorder=3 + z, alpha=.95,
+                    markeredgecolor="white", markeredgewidth=.8)
+    axes[0].axhline(READ_BEAT_CEILING, color=INK["muted"], ls=":", lw=1.2)
+    axes[0].annotate("0.500", xy=(13, READ_BEAT_CEILING), xytext=(0, 5),
+                     textcoords="offset points", fontsize=8.5, color=INK["muted"],
+                     ha="right")
+    axes[1].axhline(1.0, color=INK["muted"], ls=":", lw=1.2)
+    _ax(axes[0], "concurrently active accelerators",
+        "aggregate throughput\n(beats per memory-tile cycle)",
+        "Aggregate is flat: 13 accelerators deliver what 1 delivers")
+    _ax(axes[1], "concurrently active accelerators",
+        "per accelerator clock cycle\n(64-bit words)",
+        "The quantum: one 64-bit word per accelerator cycle")
+    for ax in axes:
+        ax.set_xticks(sorted(g.n_active.unique()))
+        ax.set_xlim(0.2, 14)
+    axes[0].set_ylim(0, 0.62); axes[1].set_ylim(0.97, 1.03)
+    axes[0].legend(fontsize=8.5, frameon=False, loc="lower right",
+                   title="all three coincide", title_fontsize=8.5)
+    axes[0].get_legend().get_title().set_color(INK["muted"])
+    fig.tight_layout()
+    return fig
+
+
+def plot_fairness_by_index(arms, burst=256, n_active=13, figsize=(8.6, 4.3)):
+    """
+    Per-accelerator elapsed time at full contention, ordered by accelerator index.
+
+    Identity on the x-axis is categorical but ordered, and the claim is about that
+    ordering, so a line over the index reads better than grouped bars.
+    """
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=figsize)
+    for k in ARM_ORDER:
+        if k not in arms:
+            continue
+        r = arms[k].runs
+        s = r[(r.n_active == n_active) & (r.burst == burst)
+              & (r.rd_per_group == 1) & (r.wr_per_group == 1)]
+        per = s.groupby("acc").cyc_active.mean()
+        rel = per / per.min()
+        ax.plot(rel.index, rel.values, "-o", color=PALETTE[k], lw=2, ms=7,
+                label=LABEL[k], zorder=3)
+    ax.axhline(1.0, color=INK["muted"], ls=":", lw=1.2)
+    _ax(ax, "accelerator index", "elapsed time relative to\nthe fastest accelerator",
+        f"Service is ordered by accelerator index  ·  "
+        f"{n_active} accelerators, {burst}-beat descriptors, 1:1")
+    ax.set_xticks(range(0, n_active))
+    ax.legend(fontsize=8.5, frameon=False, loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+def plot_inbound_not_the_limit(arms, n_active=13, figsize=(7.8, 5.4)):
+    """
+    Throughput and inbound stall on a shared descriptor axis.
+
+    Two rows rather than two y-axes: the claim is that one of these varies while
+    the other does not, and a dual-axis chart would invite reading a relationship
+    off the crossing point instead.
+    """
+    import matplotlib.pyplot as plt
+    g = occupancy_all(arms)
+    s = g[(g.arm == "baseline_ot1_gate0") & (g.rd == 1) & (g.wr == 0)
+          & (g.n_active == n_active)].sort_values("burst")
+    col = PALETTE["baseline_ot1_gate0"]
+    fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
+    axes[0].plot(s.burst, s.tot_beats_per_cyc, "-o", color=col, lw=2, ms=7, zorder=3)
+    axes[0].axhline(READ_BEAT_CEILING, color=INK["muted"], ls=":", lw=1.2)
+    axes[0].annotate("0.500", xy=(16384, READ_BEAT_CEILING), xytext=(0, 5),
+                     textcoords="offset points", fontsize=8.5,
+                     color=INK["muted"], ha="right")
+    axes[1].plot(s.burst, s.noc_stop_req_pct, "-o", color=col, lw=2, ms=7, zorder=3)
+    lo, hi = s[s.burst <= 64].noc_stop_req_pct.min(), s[s.burst <= 64].noc_stop_req_pct.max()
+    axes[1].axhspan(lo, hi, color=INK["grid"], alpha=.7, zorder=0, lw=0)
+    axes[1].annotate(f"{lo:.1f}% to {hi:.1f}% across bursts 8-64,\n"
+                     f"while throughput over the same points varies "
+                     f"{s[s.burst<=64].tot_beats_per_cyc.max()/s[s.burst<=64].tot_beats_per_cyc.min():.1f}x",
+                     xy=(300, (lo + hi) / 2 - 22), fontsize=8.5,
+                     color=INK["secondary"], ha="left", va="top")
+    _ax(axes[0], None, "throughput\n(beats per memory-tile cycle)", logx=True)
+    _ax(axes[1], "descriptor length (64-bit beats)",
+        "inbound request flits\nrefused (% of cycles)", logx=True)
+    axes[0].set_ylim(0, 0.68)
+    axes[1].set_ylim(0, 108)
+    fig.suptitle(f"Inbound stall is pinned while throughput varies  ·  "
+                 f"baseline, {n_active} accelerators, read-only",
+                 fontsize=11, color=INK["primary"], x=0.012, ha="left", y=0.985)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    return fig
