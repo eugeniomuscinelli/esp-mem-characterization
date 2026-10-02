@@ -1268,3 +1268,154 @@ def effective_concurrency(arms: dict, rdg=1, wrg=0, n_active: int = 13) -> pd.Da
     d = pd.DataFrame(out)
     d.index.name = "descriptor length (beats)"
     return d
+
+
+def plot_elapsed(arms, rdg=1, wrg=0, n_active: int = 13, figsize=(8.4, 4.6)):
+    """
+    Total elapsed cycles against descriptor length, at constant data moved.
+
+    The most direct result the campaign has, and the one a table buries: the
+    optimum is at neither end of the axis. Log-log, because the span is 4x
+    vertically and 2048x horizontally.
+    """
+    import matplotlib.pyplot as plt
+    d = elapsed_comparison(arms, rdg=rdg, wrg=wrg, n_active=n_active)
+    fig, ax = plt.subplots(figsize=figsize)
+    for k in ARM_ORDER:
+        if LABEL[k] not in d.columns:
+            continue
+        y = d[LABEL[k]]
+        ax.plot(y.index, y.values, "-o", color=PALETTE[k], lw=2, ms=7,
+                label=LABEL[k], zorder=3)
+        lo = y.idxmin()
+        ax.plot([lo], [y.min()], "o", color=PALETTE[k], ms=13, mfc="none",
+                mew=2, zorder=4)
+        # depth 2 and depth 4 share an optimum at the same descriptor length,
+        # so the labels must not be placed identically.
+        dy = {0: -19, 1: -19, 2: 13}[ARM_ORDER.index(k)]
+        ha = {0: "center", 1: "right", 2: "left"}[ARM_ORDER.index(k)]
+        ax.annotate(f"{y.min()/ACC_CLK_HZ*1e3:.1f} ms", xy=(lo, y.min()),
+                    xytext=(0, dy), textcoords="offset points", ha=ha,
+                    fontsize=8.5, color=INK["secondary"])
+    _ax(ax, "descriptor length (64-bit beats)",
+        "elapsed cycles for the whole transfer", logx=True)
+    ax.set_yscale("log")
+    ax.legend(fontsize=8.5, frameon=False, loc="upper right")
+    ax.set_title(f"Same {n_active*SIZE_BEATS_4X4*8/1e6:.2f} MB moved in every point · "
+                 f"rings mark each arm's optimum",
+                 fontsize=11, color=INK["primary"], loc="left", pad=10)
+    fig.tight_layout()
+    return fig
+
+
+def plot_handoff(arms, arm="multiot_ot4_gate1", rdg=1, wrg=0, n_active=13,
+                 figsize=(7.8, 5.6)):
+    """
+    Why long descriptors are slower: the port fills the path's buffering and then
+    waits on one accelerator.
+
+    Two rows, not two y-axes. The upper row is what the memory tile's injection
+    port achieves; the lower row is how often the buffer in front of it is full.
+    They move in opposite directions, which is the mechanism.
+    """
+    import matplotlib.pyplot as plt
+    o = occupancy(arms[arm])
+    s = o[(o.rd == rdg) & (o.wr == wrg) & (o.n_active == n_active)].groupby(
+        "burst").mean(numeric_only=True)
+    col = PALETTE[arm]
+    fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
+
+    port = s.ddr_read_beats / s.mem_cyc
+    axes[0].plot(s.index, port, "-o", color=col, lw=2, ms=7, zorder=3)
+    axes[0].axhline(1.0, color=INK["muted"], ls=":", lw=1.2)
+    axes[0].axhline(0.5, color=INK["muted"], ls="--", lw=1.2)
+    axes[0].annotate("1.000  the injection port's own limit", xy=(16384, 1.0),
+                     xytext=(0, 5), textcoords="offset points", ha="right",
+                     fontsize=8, color=INK["secondary"])
+    axes[0].annotate("0.500  what ONE receiving accelerator can absorb",
+                     xy=(16384, 0.5), xytext=(0, -13), textcoords="offset points",
+                     ha="right", fontsize=8, color=INK["secondary"])
+    axes[0].set_ylim(0, 1.18)
+
+    blocked = 100 * s.dma_snd_blocked / s.mem_cyc
+    axes[1].plot(s.index, blocked, "-o", color=col, lw=2, ms=7, zorder=3)
+    axes[1].set_ylim(-3, 58)
+    axes[1].annotate("buffer never fills:\nthe port hands off\nand moves on",
+                     xy=(8.6, 8), fontsize=8.5, color=INK["secondary"], ha="left",
+                     va="bottom")
+    axes[1].annotate("buffer permanently full:\nthe port waits on\none accelerator",
+                     xy=(15000, 38), fontsize=8.5, color=INK["secondary"],
+                     ha="right", va="top")
+
+    _ax(axes[0], None, "beats delivered per\nmemory-tile cycle", logx=True)
+    _ax(axes[1], "descriptor length (64-bit beats)",
+        "outbound buffer full\n(% of cycles)", logx=True)
+    fig.suptitle(f"{LABEL[arm]} · {n_active} accelerators, read-only",
+                 fontsize=11, color=INK["primary"], x=0.012, ha="left", y=0.985)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    return fig
+
+
+def plot_peak_by_mix(arms, figsize=(7.8, 3.8)):
+    """
+    Best port utilisation reached, split by traffic direction mix.
+
+    An AXI port cannot see direction, so if the port were the constraint these
+    four bars would be equal height. They are not, and that is the argument.
+    """
+    import matplotlib.pyplot as plt
+    g = occupancy_all(arms)
+    order = [(1, 0, "read-only\n1:0"), (1, 4, "write-heavy\n1:4"),
+             (4, 1, "read-heavy\n4:1"), (1, 1, "balanced\n1:1")]
+    vals, labs = [], []
+    for rd, wr, lab in order:
+        vals.append(100 * g[(g.rd == rd) & (g.wr == wr)].tot_beats_per_cyc.max())
+        labs.append(lab)
+    fig, ax = plt.subplots(figsize=figsize)
+    bars = ax.bar(labs, vals, color=PALETTE["baseline_ot1_gate0"], width=.62,
+                  zorder=3)
+    for b, v in zip(bars, vals):
+        ax.annotate(f"{v:.1f}%", xy=(b.get_x() + b.get_width()/2, v), xytext=(0, 4),
+                    textcoords="offset points", ha="center", fontsize=9.5,
+                    color=INK["primary"])
+    ax.axhline(100, color=INK["muted"], ls=":", lw=1.2)
+    ax.annotate("the MIG AXI port's limit", xy=(3.42, 100), xytext=(0, 4),
+                textcoords="offset points", ha="right", fontsize=8,
+                color=INK["secondary"])
+    _ax(ax, None, "best port utilisation\nreached anywhere (%)")
+    ax.set_ylim(0, 112)
+    ax.set_title("A port cannot see direction · if it were the limit, "
+                 "these would be equal",
+                 fontsize=11, color=INK["primary"], loc="left", pad=10)
+    fig.tight_layout()
+    return fig
+
+
+def plot_effective_concurrency(arms, rdg=1, wrg=0, n_active=13, figsize=(8.4, 4.4)):
+    """
+    Aggregate expressed in units of one receiving accelerator's absorption rate.
+
+    Three regimes read directly off the 1.0 line: below it nothing is kept fed,
+    at it exactly one accelerator is being drained, above it several are draining
+    at once from buffering.
+    """
+    import matplotlib.pyplot as plt
+    d = effective_concurrency(arms, rdg=rdg, wrg=wrg, n_active=n_active)
+    fig, ax = plt.subplots(figsize=figsize)
+    for k in ARM_ORDER:
+        if LABEL[k] not in d.columns:
+            continue
+        ax.plot(d.index, d[LABEL[k]], "-o", color=PALETTE[k], lw=2, ms=7,
+                label=LABEL[k], zorder=3)
+    ax.axhline(1.0, color=INK["muted"], ls="--", lw=1.4)
+    ax.annotate("1.0  =  exactly one accelerator's worth", xy=(16384, 1.0),
+                xytext=(0, 6), textcoords="offset points", ha="right",
+                fontsize=8.5, color=INK["secondary"])
+    _ax(ax, "descriptor length (64-bit beats)",
+        "aggregate, in units of one\naccelerator's absorption rate", logx=True)
+    ax.legend(fontsize=8.5, frameon=False, loc="lower left")
+    ax.set_title(f"{n_active} accelerators, "
+                 f"{'read-only' if wrg == 0 else 'balanced 1:1'}",
+                 fontsize=11, color=INK["primary"], loc="left", pad=10)
+    fig.tight_layout()
+    return fig
