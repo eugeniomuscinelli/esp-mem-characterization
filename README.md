@@ -7,10 +7,15 @@ change about it.
 Two campaigns on a Xilinx VCU118 (xcvu9p), each with three bitstreams differing only in how
 many AXI reads the memory-tile DMA proxy may keep in flight — 1 (stock ESP), 2, and 4.
 
-| report | SoC | accelerators | runs per arm | |
-|---|---|---|---|---|
-| **3×3** | 3×3 mesh, 9 tiles | 6 | 193 | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/eugeniomuscinelli/esp-mem-characterization/blob/main/characterization_report.ipynb) |
-| **4×4** | 4×4 mesh, 16 tiles | 13 | 505 | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/eugeniomuscinelli/esp-mem-characterization/blob/main/characterization_report_4x4.ipynb) |
+| | what it is | |
+|---|---|---|
+| **Summary** | the short version -- setup, tests, results, ~15 minutes | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/eugeniomuscinelli/esp-mem-characterization/blob/main/characterization_summary.ipynb) |
+| **4x4 campaign** | the full analysis: 16 tiles, 13 accelerators, 504 runs per arm | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/eugeniomuscinelli/esp-mem-characterization/blob/main/characterization_report_4x4.ipynb) |
+| **3x3 campaign** | the earlier, smaller study: 9 tiles, 6 accelerators, 193 runs per arm | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/eugeniomuscinelli/esp-mem-characterization/blob/main/characterization_report.ipynb) |
+
+**Start with the summary.** The 4x4 report is the reference: every counter traced to its RTL
+signal, what each one does *not* mean, and what the campaign establishes against what it only
+suggests.
 
 Both notebooks ship with their outputs, so they render fully without running anything.
 
