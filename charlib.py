@@ -1419,3 +1419,47 @@ def plot_effective_concurrency(arms, rdg=1, wrg=0, n_active=13, figsize=(8.4, 4.
                  fontsize=11, color=INK["primary"], loc="left", pad=10)
     fig.tight_layout()
     return fig
+
+
+def plot_speedup_vs_size(arms, n_active: int = 13, figsize=(12.0, 4.3)):
+    """
+    Speedup over baseline against request size.
+
+    The companion to plot_speedup_vs_fanin: that one fixes the request size and
+    sweeps concurrency, this one fixes concurrency and sweeps request size. The
+    baseline is the reference line at parity rather than a plotted series, since
+    its speedup over itself is 1 by construction.
+    """
+    import matplotlib.pyplot as plt
+    g = occupancy_all(arms)
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
+    panels = [(1, 0, "read-only"), (1, 1, "balanced, half reads half writes")]
+    for ax, (rdg, wrg, title) in zip(axes, panels):
+        base = g[(g.arm == "baseline_ot1_gate0") & (g.rd == rdg) & (g.wr == wrg)
+                 & (g.n_active == n_active)].set_index("burst").tot_beats_per_cyc
+        ax.axhline(1.0, color=INK["muted"], ls=":", lw=1.4, zorder=1)
+        ax.annotate("baseline", xy=(131072, 1.0), xytext=(0, -15),
+                    textcoords="offset points", ha="right", fontsize=8.5,
+                    color=INK["secondary"])
+        for arm in ("multiot_ot2_gate1", "multiot_ot4_gate1"):
+            s = g[(g.arm == arm) & (g.rd == rdg) & (g.wr == wrg)
+                  & (g.n_active == n_active)].set_index("burst").tot_beats_per_cyc
+            sp = (s / base).sort_index()
+            ax.plot(sp.index * 8, sp.values, "-o", color=PALETTE[arm], lw=2, ms=7,
+                    label=LABEL[arm], zorder=3)
+            top = sp.idxmax()
+            ax.annotate(f"{sp.max():.2f}x", xy=(top * 8, sp.max()), xytext=(0, 8),
+                        textcoords="offset points", ha="center", fontsize=8.5,
+                        color=INK["secondary"])
+        _ax(ax, "request size (bytes)", None, title, logx=True)
+        ax.set_xticks([64, 256, 1024, 8192, 131072])
+        ax.set_xticklabels(["64 B", "256 B", "1 KB", "8 KB", "128 KB"])
+    axes[0].set_ylabel("throughput relative to baseline", fontsize=9,
+                       color=INK["secondary"])
+    axes[0].legend(fontsize=8.5, frameon=False, loc="upper right")
+    axes[0].set_ylim(0.85, 3.4)
+    fig.suptitle(f"multiOT pays off only for small requests  ·  "
+                 f"{n_active} accelerators",
+                 fontsize=12.5, color=INK["primary"], x=0.012, ha="left", y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return fig
